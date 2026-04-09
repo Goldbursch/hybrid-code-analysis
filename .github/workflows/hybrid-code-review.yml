@@ -1,0 +1,109 @@
+name: Hybrid Code Review (LLM + SonarQube)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  hybrid-review:
+    runs-on: ubuntu-latest
+    name: Analyse code changes with SonarQube + OpenAI
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history is required so that git diff can reach the base commit
+          # and SonarQube can perform a complete blame analysis.
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------ #
+      # Run SonarCloud static analysis.                                     #
+      # Results are stored in SonarCloud and fetched via API afterwards.    #
+      # ------------------------------------------------------------------ #
+      - name: SonarCloud scan
+        uses: SonarSource/sonarcloud-github-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ------------------------------------------------------------------ #
+      # Expose the base SHA so that the Python script can build the diff.   #
+      # ------------------------------------------------------------------ #
+      - name: Expose base SHA (pull_request)
+        if: github.event_name == 'pull_request'
+        run: echo "GITHUB_BASE_SHA=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_ENV"
+
+      - name: Expose before SHA (push)
+        if: github.event_name == 'push'
+        run: echo "GITHUB_BEFORE_SHA=${{ github.event.before }}" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------ #
+      # Verify the OpenAI secret is available before running the analysis.  #
+      # ------------------------------------------------------------------ #
+      - name: Check secret presence
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY is MISSING"
+            exit 1
+          else
+            echo "OPENAI_API_KEY is present"
+          fi
+
+      # ------------------------------------------------------------------ #
+      # Secrets are not exposed to workflows triggered from forked PRs.     #
+      # ------------------------------------------------------------------ #
+      - name: Skip on forked PRs
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: echo "Skipping hybrid review because secrets are unavailable on forked pull requests."
+
+      # ------------------------------------------------------------------ #
+      # Run the hybrid analysis: fetch SonarQube results then call OpenAI. #
+      # ------------------------------------------------------------------ #
+      - name: Run hybrid code analysis
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Override the model via a repository variable if desired.
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        run: python scripts/analyze_code.py
+
+      # ------------------------------------------------------------------ #
+      # Persist the generated feedback files as a workflow artifact.        #
+      # ------------------------------------------------------------------ #
+      - name: Upload feedback artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-code-review-${{ github.sha }}
+          path: feedback/
+          # Retain artifacts for 90 days (maximum for public repos).
+          retention-days: 90
+          if-no-files-found: warn
