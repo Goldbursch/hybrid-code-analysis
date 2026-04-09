@@ -23,6 +23,12 @@ MAX_DIFF_LENGTH = 15_000
 # Maximum number of SonarQube issues included in the prompt.
 MAX_SONAR_ISSUES = 100
 
+# Maximum tokens the model may use for its response.
+MAX_RESPONSE_TOKENS = 2048
+
+# Null SHA used by GitHub to indicate an initial push with no previous commit.
+NULL_SHA = "0" * 40
+
 # OpenAI model used for the code review.
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
@@ -56,7 +62,7 @@ def get_diff() -> str:
     before_sha = os.environ.get("GITHUB_BEFORE_SHA", "")
     head_sha = os.environ.get("GITHUB_SHA", "HEAD")
 
-    if not before_sha or before_sha == "0" * 40:
+    if not before_sha or before_sha == NULL_SHA:
         return _run_git_diff("HEAD~1", "HEAD")
 
     return _run_git_diff(before_sha, head_sha)
@@ -161,7 +167,7 @@ def analyze_with_openai(diff: str, sonar_issues_text: str) -> str:
             {"role": "user", "content": user_message},
         ],
         temperature=0.3,
-        max_tokens=2048,
+        max_tokens=MAX_RESPONSE_TOKENS,
     )
 
     return response.choices[0].message.content
@@ -299,7 +305,7 @@ def main() -> None:
             issues = get_sonarqube_issues(sonar_project_key, sonar_token, sonar_host_url)
             sonar_issues_text = format_sonarqube_issues(issues)
             print(f"📊  SonarQube: {len(issues)} issue(s) retrieved.")
-        except Exception as exc:  # noqa: BLE001
+        except requests.RequestException as exc:  # noqa: BLE001
             sonar_issues_text = f"Failed to retrieve SonarQube issues: {exc}"
             print(f"⚠️  {sonar_issues_text}")
     else:
